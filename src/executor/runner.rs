@@ -161,7 +161,7 @@ pub fn run_debugger(
                         if let Ok(line_num) = cmd[2..].trim().parse::<usize>() {
                             ctx.add_breakpoint(line_num);
                         } else {
-                            eprintln!("❌ Invalid line number");
+                            eprintln!("ERROR: Invalid line number");
                         }
                     }
                     "" => {
@@ -200,7 +200,7 @@ pub fn run_debugger(
                 );
                 pc = logical_target;
             } else {
-                eprintln!("❌ CALL to unknown label: {}", label_key);
+                eprintln!("ERROR: CALL to unknown label: {}", label_key);
                 break 'run;
             }
             continue;
@@ -221,7 +221,7 @@ pub fn run_debugger(
             continue;
         }
         if line_upper == "GOTO :EOF" {
-            eprintln!("\n↩️  GOTO :EOF (returning from subroutine)");
+            eprintln!("\nGOTO :EOF (returning from subroutine)");
 
             match leave_context(&mut ctx.call_stack) {
                 Some(next_pc) => {
@@ -248,7 +248,7 @@ pub fn run_debugger(
                 );
                 pc = logical_target;
             } else {
-                eprintln!("❌ GOTO to unknown label: {}", label_key);
+                eprintln!("ERROR: GOTO to unknown label: {}", label_key);
                 break 'run;
             }
             continue;
@@ -279,14 +279,14 @@ pub fn run_debugger(
                 print!("{}", out);
             }
             ctx.last_exit_code = code;
-            eprintln!("    └─ block exit code: {}", code);
+            eprintln!("    |-- block exit code: {}", code);
 
             pc = block_pc;
             continue;
         }
         if !should_stop {
             eprintln!(
-                "\n▶️  [Lines {}-{}] depth={} group={:?}",
+                "\n[Lines {}-{}] depth={} group={:?}",
                 ll.phys_start + 1,
                 ll.phys_end + 1,
                 ll.group_depth,
@@ -324,7 +324,7 @@ pub fn run_debugger(
                 }
 
                 if parts.len() > 1 {
-                    eprintln!("    ├─ Part {}: {}", i + 1, exec_text);
+                    eprintln!("    |-- Part {}: {}", i + 1, exec_text);
                 }
 
                 ctx.track_set_command(&exec_text);
@@ -336,10 +336,10 @@ pub fn run_debugger(
 
                 ctx.last_exit_code = code;
                 if !should_stop {
-                    eprintln!("    └─ exit code: {}", code);
+                    eprintln!("    |-- exit code: {}", code);
                 }
             } else {
-                eprintln!("    ├─ Part {} skipped (condition failed)", i + 1);
+                eprintln!("    |-- Part {} skipped (condition failed)", i + 1);
             }
         }
 

@@ -90,6 +90,7 @@ pub struct DapServer {
     pub event_receiver: Option<Receiver<(String, usize)>>,
     pub output_receiver: Option<Receiver<String>>,
     message_reader: MessageReader,
+    watch_expressions: Vec<String>,
 }
 
 impl DapServer {
@@ -102,6 +103,7 @@ impl DapServer {
             breakpoints: HashMap::new(),
             program_path: None,
             event_receiver: None,
+            watch_expressions: Vec::new(),
             output_receiver: None,
             message_reader: MessageReader::new(),
         }
@@ -110,6 +112,33 @@ impl DapServer {
     fn next_seq(&mut self) -> u64 {
         self.seq += 1;
         self.seq
+    }
+
+    /// Add a watch expression
+    pub fn add_watch(&mut self, expression: String) {
+        if !self.watch_expressions.contains(&expression) {
+            self.watch_expressions.push(expression);
+        }
+    }
+
+    /// Remove a watch expression
+    pub fn remove_watch(&mut self, expression: &str) {
+        self.watch_expressions.retain(|e| e != expression);
+    }
+
+    /// Get all watch expressions
+    pub fn get_watches(&self) -> &[String] {
+        &self.watch_expressions
+    }
+
+    /// Set the debug context (for testing)
+    pub fn set_context(&mut self, context: Arc<Mutex<DebugContext>>) {
+        self.context = Some(context);
+    }
+
+    /// Get a reference to the context (for testing)
+    pub fn get_context(&self) -> Option<&Arc<Mutex<DebugContext>>> {
+        self.context.as_ref()
     }
 
     pub fn send_response(
@@ -165,7 +194,7 @@ impl DapServer {
         use std::io::Write;
         let _ = std::io::stdout().flush();
 
-        eprintln!("📤 Sent {} bytes", content_length);
+        eprintln!("SENT: {} bytes", content_length);
     }
 
     // BESKED TIL MIG SELV:
@@ -220,8 +249,10 @@ impl DapServer {
             "supportsStepBack": false,
             "supportsStepInTargetsRequest": false,
             "supportsFunctionBreakpoints": false,
-            "supportsConditionalBreakpoints": false,
-            "supportsSetVariable": false,
+            "supportsConditionalBreakpoints": true,
+            "supportsSetVariable": true,
+            "supportsDataBreakpoints": true,
+            "supportsEvaluateForHovers": true,
         });
         self.send_response(seq, command, true, Some(body));
 
@@ -275,7 +306,7 @@ impl DapServer {
 
                 match CmdSession::start() {
                     Ok(session) => {
-                        eprintln!("✓ CMD session started");
+                        eprintln!("CMD session started");
                         if let Some(ref mut f) = log {
                             use std::io::Write;
                             writeln!(f, "CMD session started successfully").ok();
@@ -299,7 +330,7 @@ impl DapServer {
                         self.labels = Some(labels_phys.clone());
 
                         self.send_response(seq, command, true, None);
-                        eprintln!("📤 Sent launch response");
+                        eprintln!("SENT: Launch response");
 
                         let mut thread_log = std::fs::OpenOptions::new()
                             .create(true)
@@ -354,10 +385,10 @@ impl DapServer {
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("❌ Execution error: {}", e);
+                                    eprintln!("ERROR: Execution error: {}", e);
                                     if let Some(ref mut f) = tlog {
                                         use std::io::Write;
-                                        writeln!(f, "❌ Execution error: {}", e).ok();
+                                        writeln!(f, "ERROR: Execution error: {}", e).ok();
                                         f.flush().ok();
                                     }
                                 }
@@ -403,26 +434,27 @@ impl DapServer {
                                             "allThreadsStopped": true
                                         })),
                                     );
-                                    eprintln!("📤 Sent initial stopped event: {}", reason);
+                                    eprintln!("SENT: Initial stopped event: {}", reason);
                                 } else {
-                                    eprintln!("⚠️ Script completed before first stop");
+                                    eprintln!("WARNING: Script completed before first stop");
                                     self.send_event("terminated".to_string(), None);
                                 }
                             } else {
                                 if let Some(ref mut f) = log {
                                     use std::io::Write;
-                                    writeln!(f, "⚠️ Timeout waiting for first stop event").ok();
+                                    writeln!(f, "WARNING: Timeout waiting for first stop event")
+                                        .ok();
                                     f.flush().ok();
                                 }
-                                eprintln!("⚠️ Timeout waiting for first stop event");
+                                eprintln!("WARNING: Timeout waiting for first stop event");
                             }
                         }
                     }
                     Err(e) => {
-                        eprintln!("❌ Failed to start CMD session: {}", e);
+                        eprintln!("ERROR: Failed to start CMD session: {}", e);
                         if let Some(ref mut f) = log {
                             use std::io::Write;
-                            writeln!(f, "❌ Failed to start CMD session: {}", e).ok();
+                            writeln!(f, "ERROR: Failed to start CMD session: {}", e).ok();
                             f.flush().ok();
                         }
                         self.send_response(seq, command, false, None);
@@ -430,10 +462,10 @@ impl DapServer {
                 }
             }
             Err(e) => {
-                eprintln!("❌ Failed to read batch file: {}", e);
+                eprintln!("ERROR: Failed to read batch file: {}", e);
                 if let Some(ref mut f) = log {
                     use std::io::Write;
-                    writeln!(f, "❌ Failed to read batch file: {}", e).ok();
+                    writeln!(f, "ERROR: Failed to read batch file: {}", e).ok();
                     f.flush().ok();
                 }
                 self.send_response(seq, command, false, None);
@@ -459,23 +491,33 @@ impl DapServer {
         let mut verified_breakpoints = Vec::new();
         let mut logical_lines = Vec::new();
 
-        eprintln!("🔍 Setting breakpoints for: {}", source_path);
+        eprintln!("BREAKPOINT: Setting breakpoints for: {}", source_path);
 
         if let Some(pre) = &self.preprocessed {
             for bp in breakpoints_array {
                 if let Some(line) = bp.get("line").and_then(|v| v.as_u64()) {
                     let phys_line = (line as usize).saturating_sub(1);
 
+                    // Extract condition if present
+                    let condition = bp
+                        .get("condition")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
                     eprintln!(
                         "   Breakpoint request: physical line {} (0-indexed: {})",
                         line, phys_line
                     );
 
+                    if let Some(ref cond) = condition {
+                        eprintln!("   Condition: {}", cond);
+                    }
+
                     if phys_line < pre.phys_to_logical.len() {
                         let logical_line = pre.phys_to_logical[phys_line];
-                        logical_lines.push(logical_line);
+                        logical_lines.push((logical_line, condition.clone()));
 
-                        eprintln!("   ✓ Mapped to logical line {}", logical_line);
+                        eprintln!("   Mapped to logical line {}", logical_line);
                         eprintln!("   Line content: {}", pre.logical[logical_line].text);
 
                         verified_breakpoints.push(json!({
@@ -483,21 +525,30 @@ impl DapServer {
                             "line": line
                         }));
                     } else {
-                        eprintln!("   ✗ Physical line {} out of range", phys_line);
+                        eprintln!("   Physical line {} out of range", phys_line);
                     }
                 }
             }
         }
 
-        self.breakpoints
-            .insert(source_path.to_string(), logical_lines.clone());
+        self.breakpoints.insert(
+            source_path.to_string(),
+            logical_lines.iter().map(|(l, _)| *l).collect(),
+        );
 
         if let Some(ctx_arc) = &self.context {
             if let Ok(mut ctx) = ctx_arc.lock() {
                 eprintln!("   Adding {} breakpoints to context", logical_lines.len());
-                for logical_line in &logical_lines {
-                    ctx.add_breakpoint(*logical_line);
-                    eprintln!("   Added breakpoint at logical line {}", logical_line);
+                for (logical_line, condition) in &logical_lines {
+                    ctx.add_breakpoint_with_condition(*logical_line, condition.clone());
+                    if let Some(cond) = condition {
+                        eprintln!(
+                            "   Added conditional breakpoint at logical line {}: {}",
+                            logical_line, cond
+                        );
+                    } else {
+                        eprintln!("   Added breakpoint at logical line {}", logical_line);
+                    }
                 }
             }
         }
@@ -611,6 +662,11 @@ impl DapServer {
                         "name": "Global",
                         "variablesReference": 2,
                         "expensive": false
+                    },
+                    {
+                        "name": "Watch",
+                        "variablesReference": 3,
+                        "expensive": false
                     }
                 ]
             })),
@@ -627,9 +683,20 @@ impl DapServer {
         let mut variables = Vec::new();
 
         if let Some(ctx_arc) = &self.context {
-            if let Ok(ctx) = ctx_arc.lock() {
+            if let Ok(mut ctx) = ctx_arc.lock() {
                 match var_ref {
                     1 => {
+                        // Add ERRORLEVEL as a special variable
+                        variables.push(json!({
+                            "name": "ERRORLEVEL",
+                            "value": ctx.last_exit_code.to_string(),
+                            "variablesReference": 0,
+                            "presentationHint": {
+                                "kind": "property",
+                                "attributes": ["readOnly"]
+                            }
+                        }));
+
                         let visible = ctx.get_visible_variables();
                         for (key, val) in visible {
                             variables.push(json!({
@@ -640,11 +707,39 @@ impl DapServer {
                         }
                     }
                     2 => {
+                        // Add ERRORLEVEL as a special variable
+                        variables.push(json!({
+                            "name": "ERRORLEVEL",
+                            "value": ctx.last_exit_code.to_string(),
+                            "variablesReference": 0,
+                            "presentationHint": {
+                                "kind": "property",
+                                "attributes": ["readOnly"]
+                            }
+                        }));
+
                         for (key, val) in &ctx.variables {
                             variables.push(json!({
                                 "name": key,
                                 "value": val,
                                 "variablesReference": 0
+                            }));
+                        }
+                    }
+                    3 => {
+                        // Watch expressions
+                        for watch_expr in &self.watch_expressions {
+                            let value = match ctx.evaluate_expression(watch_expr) {
+                                Ok(result) => result,
+                                Err(e) => format!("<error: {}>", e),
+                            };
+                            variables.push(json!({
+                                "name": watch_expr,
+                                "value": value,
+                                "variablesReference": 0,
+                                "presentationHint": {
+                                    "kind": "property"
+                                }
                             }));
                         }
                     }
@@ -725,6 +820,252 @@ impl DapServer {
                 "allThreadsStopped": true
             })),
         );
+    }
+
+    pub fn handle_set_variable(&mut self, seq: u64, command: String, args: Option<Value>) {
+        eprintln!("📝 Handling setVariable request");
+
+        // Extract variable name and value from arguments
+        let var_name = args
+            .as_ref()
+            .and_then(|v| v.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let var_value = args
+            .as_ref()
+            .and_then(|v| v.get("value"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // Don't allow setting ERRORLEVEL (it's read-only)
+        if var_name.eq_ignore_ascii_case("ERRORLEVEL") {
+            eprintln!("ERROR: Cannot set ERRORLEVEL (read-only)");
+            self.send_response(
+                seq,
+                command,
+                false,
+                Some(json!({
+                    "error": {
+                        "id": 1,
+                        "format": "ERRORLEVEL is read-only and cannot be modified"
+                    }
+                })),
+            );
+            return;
+        }
+
+        if var_name.is_empty() {
+            eprintln!("ERROR: Variable name is empty");
+            self.send_response(seq, command, false, None);
+            return;
+        }
+
+        eprintln!("   Setting: {}={}", var_name, var_value);
+
+        // Set the variable in the context
+        let result = if let Some(ctx_arc) = &self.context {
+            if let Ok(mut ctx) = ctx_arc.lock() {
+                ctx.set_variable(var_name, var_value)
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Failed to lock context",
+                ))
+            }
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "No context available",
+            ))
+        };
+
+        // Send response after releasing the lock
+        match result {
+            Ok(_) => {
+                eprintln!("Variable set successfully");
+                self.send_response(
+                    seq,
+                    command,
+                    true,
+                    Some(json!({
+                        "value": var_value,
+                        "variablesReference": 0
+                    })),
+                );
+            }
+            Err(e) => {
+                eprintln!("ERROR: Failed to set variable: {}", e);
+                self.send_response(seq, command, false, None);
+            }
+        }
+    }
+
+    pub fn handle_evaluate(&mut self, seq: u64, command: String, args: Option<Value>) {
+        eprintln!("EVAL: Handling evaluate request");
+
+        // Extract expression and context from arguments
+        let expression = args
+            .as_ref()
+            .and_then(|v| v.get("expression"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let context = args
+            .as_ref()
+            .and_then(|v| v.get("context"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("hover");
+
+        if expression.is_empty() {
+            eprintln!("ERROR: Expression is empty");
+            self.send_response(seq, command, false, None);
+            return;
+        }
+
+        eprintln!("   Expression: '{}', Context: {}", expression, context);
+
+        // If context is "watch", add to watch expressions list
+        if context == "watch" {
+            if !self.watch_expressions.contains(&expression.to_string()) {
+                self.watch_expressions.push(expression.to_string());
+                eprintln!("WATCH: Added watch expression: '{}'", expression);
+            }
+        }
+
+        // Evaluate the expression in the context
+        let result = if let Some(ctx_arc) = &self.context {
+            if let Ok(mut ctx) = ctx_arc.lock() {
+                ctx.evaluate_expression(expression)
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Failed to lock context",
+                ))
+            }
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "No context available",
+            ))
+        };
+
+        // Send response after releasing the lock
+        match result {
+            Ok(value) => {
+                eprintln!("Evaluation successful: '{}'", value);
+                self.send_response(
+                    seq,
+                    command,
+                    true,
+                    Some(json!({
+                        "result": value,
+                        "variablesReference": 0
+                    })),
+                );
+            }
+            Err(e) => {
+                eprintln!("ERROR: Evaluation failed: {}", e);
+                self.send_response(
+                    seq,
+                    command,
+                    false,
+                    Some(json!({
+                        "error": {
+                            "id": 1,
+                            "format": format!("Evaluation failed: {}", e)
+                        }
+                    })),
+                );
+            }
+        }
+    }
+
+    pub fn handle_data_breakpoint_info(&mut self, seq: u64, command: String, args: Option<Value>) {
+        eprintln!("DATA_BP: Handling dataBreakpointInfo request");
+
+        // Extract variable name from arguments
+        let variable_name = args
+            .as_ref()
+            .and_then(|v| v.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if variable_name.is_empty() {
+            eprintln!("ERROR: Variable name is empty");
+            self.send_response(seq, command, false, None);
+            return;
+        }
+
+        eprintln!("   Variable: '{}'", variable_name);
+
+        // Return data breakpoint info
+        // dataId is the variable name itself
+        self.send_response(
+            seq,
+            command,
+            true,
+            Some(json!({
+                "dataId": variable_name,
+                "description": format!("Break when '{}' changes", variable_name),
+                "accessTypes": ["write"],
+                "canPersist": false
+            })),
+        );
+    }
+
+    pub fn handle_set_data_breakpoints(&mut self, seq: u64, command: String, args: Option<Value>) {
+        eprintln!("DATA_BP: Handling setDataBreakpoints request");
+
+        // Extract breakpoints array from arguments
+        let breakpoints = args
+            .as_ref()
+            .and_then(|v| v.get("breakpoints"))
+            .and_then(|v| v.as_array());
+
+        let mut result_breakpoints = Vec::new();
+        let success = if let Some(ctx_arc) = self.context.clone() {
+            if let Ok(mut ctx) = ctx_arc.lock() {
+                // Clear existing data breakpoints
+                let existing: Vec<String> = ctx.get_data_breakpoints().keys().cloned().collect();
+                for var_name in existing {
+                    ctx.remove_data_breakpoint(&var_name);
+                }
+
+                // Add new data breakpoints
+                if let Some(bps) = breakpoints {
+                    for bp in bps {
+                        if let Some(data_id) = bp.get("dataId").and_then(|v| v.as_str()) {
+                            eprintln!("   Adding data breakpoint on: {}", data_id);
+                            ctx.add_data_breakpoint(data_id.to_string());
+
+                            result_breakpoints.push(json!({
+                                "verified": true
+                            }));
+                        }
+                    }
+                }
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if success {
+            self.send_response(
+                seq,
+                command,
+                true,
+                Some(json!({
+                    "breakpoints": result_breakpoints
+                })),
+            );
+        } else {
+            eprintln!("ERROR: Failed to set data breakpoints");
+            self.send_response(seq, command, false, None);
+        }
     }
 
     pub fn check_and_send_output(&mut self) {

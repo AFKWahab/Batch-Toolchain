@@ -48,9 +48,9 @@ pub fn run_dap_mode() -> io::Result<()> {
                         "allThreadsStopped": true
                     })),
                 );
-                eprintln!("📤 Sent stopped event: {}", reason);
+                eprintln!("SENT: Stopped event: {}", reason);
             } else {
-                eprintln!("📤 Sending terminated event");
+                eprintln!("SENT: Sending terminated event");
                 server.send_event("terminated".to_string(), None);
             }
         }
@@ -58,11 +58,11 @@ pub fn run_dap_mode() -> io::Result<()> {
             msg_count += 1;
 
             if let Some(ref mut f) = log {
-                writeln!(f, "✓ Received message #{}: {:?}", msg_count, msg.content).ok();
+                writeln!(f, "Received message #{}: {:?}", msg_count, msg.content).ok();
                 f.flush().ok();
             }
 
-            eprintln!("📨 Received: {:?}", msg.content);
+            eprintln!("RECEIVED: {:?}", msg.content);
 
             match msg.content {
                 DapMessageContent::Request { command, arguments } => match command.as_str() {
@@ -98,6 +98,12 @@ pub fn run_dap_mode() -> io::Result<()> {
                     "variables" => {
                         server.handle_variables(msg.seq, command, arguments);
                     }
+                    "setVariable" => {
+                        server.handle_set_variable(msg.seq, command, arguments);
+                    }
+                    "evaluate" => {
+                        server.handle_evaluate(msg.seq, command, arguments);
+                    }
                     "continue" => {
                         server.handle_continue(msg.seq, command);
                     }
@@ -114,12 +120,18 @@ pub fn run_dap_mode() -> io::Result<()> {
                         eprintln!("Handling pause");
                         server.handle_pause(msg.seq, command);
                     }
+                    "dataBreakpointInfo" => {
+                        server.handle_data_breakpoint_info(msg.seq, command, arguments);
+                    }
+                    "setDataBreakpoints" => {
+                        server.handle_set_data_breakpoints(msg.seq, command, arguments);
+                    }
                     "disconnect" => {
                         server.send_response(msg.seq, command, true, None);
                         break;
                     }
                     _ => {
-                        eprintln!("⚠️  Unhandled DAP command: {}", command);
+                        eprintln!("WARNING: Unhandled DAP command: {}", command);
                         server.send_response(msg.seq, command, false, None);
                     }
                 },

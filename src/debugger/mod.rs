@@ -3,6 +3,7 @@ mod context;
 mod session;
 mod stepping;
 
+pub use breakpoints::Breakpoint;
 pub use context::DebugContext;
 pub use session::CmdSession;
 pub use stepping::RunMode;

@@ -1,4 +1,4 @@
-/// One physical→logical joined line (before block annotation).
+/// One physical->logical joined line (before block annotation).
 #[derive(Debug, Clone)]
 pub struct JoinedLine {
     pub text: String,

@@ -1,10 +1,69 @@
 use crate::debugger::{leave_context, DebugContext, Frame, RunMode};
-use crate::parser::{normalize_whitespace, PreprocessResult};
+use crate::parser::{
+    normalize_whitespace, parse_for_statement, parse_if_statement, parse_redirections,
+    PreprocessResult,
+};
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// Check if a command is a CMD built-in command
+fn is_builtin_command(cmd: &str) -> bool {
+    let cmd_upper = cmd.to_uppercase();
+
+    // Extract just the command name (before first space or special char)
+    let cmd_name = cmd_upper.split_whitespace().next().unwrap_or(&cmd_upper);
+
+    // List of CMD built-in commands
+    matches!(
+        cmd_name,
+        "ASSOC"
+            | "BREAK"
+            | "CALL"
+            | "CD"
+            | "CHDIR"
+            | "CLS"
+            | "COLOR"
+            | "COPY"
+            | "DATE"
+            | "DEL"
+            | "DIR"
+            | "ECHO"
+            | "ENDLOCAL"
+            | "ERASE"
+            | "EXIT"
+            | "FOR"
+            | "FTYPE"
+            | "GOTO"
+            | "IF"
+            | "MD"
+            | "MKDIR"
+            | "MKLINK"
+            | "MOVE"
+            | "PATH"
+            | "PAUSE"
+            | "POPD"
+            | "PROMPT"
+            | "PUSHD"
+            | "RD"
+            | "REM"
+            | "REN"
+            | "RENAME"
+            | "RMDIR"
+            | "SET"
+            | "SETLOCAL"
+            | "SHIFT"
+            | "START"
+            | "TIME"
+            | "TITLE"
+            | "TYPE"
+            | "VER"
+            | "VERIFY"
+            | "VOL"
+    )
+}
 
 pub fn run_debugger_dap(
     ctx_arc: Arc<Mutex<DebugContext>>,
@@ -42,9 +101,9 @@ pub fn run_debugger_dap(
             let mut ctx = match ctx_arc.lock() {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("❌ Failed to lock context: {}", e);
+                    eprintln!("ERROR: Failed to lock context: {}", e);
                     if let Some(ref mut f) = log {
-                        writeln!(f, "❌ Failed to lock context: {}", e).ok();
+                        writeln!(f, "ERROR: Failed to lock context: {}", e).ok();
                         f.flush().ok();
                     }
                     break 'run;
@@ -87,12 +146,12 @@ pub fn run_debugger_dap(
                 f.flush().ok();
             }
 
-            let ctx = match ctx_arc.lock() {
+            let mut ctx = match ctx_arc.lock() {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("❌ Failed to lock context: {}", e);
+                    eprintln!("ERROR: Failed to lock context: {}", e);
                     if let Some(ref mut f) = log {
-                        writeln!(f, "❌ Failed to lock context: {}", e).ok();
+                        writeln!(f, "ERROR: Failed to lock context: {}", e).ok();
                         f.flush().ok();
                     }
                     break 'run;
@@ -142,7 +201,7 @@ pub fn run_debugger_dap(
                 let ctx = match ctx_arc.lock() {
                     Ok(c) => c,
                     Err(e) => {
-                        eprintln!("❌ Failed to lock context: {}", e);
+                        eprintln!("ERROR: Failed to lock context: {}", e);
                         break 'run;
                     }
                 };
@@ -153,9 +212,9 @@ pub fn run_debugger_dap(
                 }
             };
             if let Err(e) = event_tx.send((stop_reason.to_string(), pc)) {
-                eprintln!("❌ Failed to send stopped event: {}", e);
+                eprintln!("ERROR: Failed to send stopped event: {}", e);
                 if let Some(ref mut f) = log {
-                    writeln!(f, "❌ Failed to send stopped event: {}", e).ok();
+                    writeln!(f, "ERROR: Failed to send stopped event: {}", e).ok();
                     f.flush().ok();
                 }
                 break 'run;
@@ -170,9 +229,9 @@ pub fn run_debugger_dap(
                 let mut ctx = match ctx_arc.lock() {
                     Ok(c) => c,
                     Err(e) => {
-                        eprintln!("❌ Failed to lock context: {}", e);
+                        eprintln!("ERROR: Failed to lock context: {}", e);
                         if let Some(ref mut f) = log {
-                            writeln!(f, "❌ Failed to lock context: {}", e).ok();
+                            writeln!(f, "ERROR: Failed to lock context: {}", e).ok();
                             f.flush().ok();
                         }
                         break 'run;
@@ -219,9 +278,9 @@ pub fn run_debugger_dap(
                 let ctx = match ctx_arc.lock() {
                     Ok(c) => c,
                     Err(e) => {
-                        eprintln!("❌ Failed to lock context during wait: {}", e);
+                        eprintln!("ERROR: Failed to lock context during wait: {}", e);
                         if let Some(ref mut f) = log {
-                            writeln!(f, "❌ Failed to lock context during wait: {}", e).ok();
+                            writeln!(f, "ERROR: Failed to lock context during wait: {}", e).ok();
                             f.flush().ok();
                         }
                         break 'run;
@@ -229,9 +288,9 @@ pub fn run_debugger_dap(
                 };
 
                 if ctx.continue_requested {
-                    eprintln!("✓ Continue requested, mode: {:?}", ctx.mode());
+                    eprintln!("Continue requested, mode: {:?}", ctx.mode());
                     if let Some(ref mut f) = log {
-                        writeln!(f, "✓ Continue requested, mode: {:?}", ctx.mode()).ok();
+                        writeln!(f, "Continue requested, mode: {:?}", ctx.mode()).ok();
                         f.flush().ok();
                     }
                     match ctx.mode() {
@@ -266,9 +325,9 @@ pub fn run_debugger_dap(
             let mut ctx = match ctx_arc.lock() {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("❌ Failed to lock context for execution: {}", e);
+                    eprintln!("ERROR: Failed to lock context for execution: {}", e);
                     if let Some(ref mut f) = log {
-                        writeln!(f, "❌ Failed to lock context for execution: {}", e).ok();
+                        writeln!(f, "ERROR: Failed to lock context for execution: {}", e).ok();
                         f.flush().ok();
                     }
                     break 'run;
@@ -279,7 +338,7 @@ pub fn run_debugger_dap(
                 let (out, code) = ctx.run_command(&line)?;
                 if !out.trim().is_empty() {
                     if let Err(e) = output_tx.send(out.clone()) {
-                        eprintln!("❌ Failed to send output: {}", e);
+                        eprintln!("ERROR: Failed to send output: {}", e);
                     }
                 }
                 ctx.last_exit_code = code;
@@ -291,7 +350,7 @@ pub fn run_debugger_dap(
                 let (out, code) = ctx.run_command(&line)?;
                 if !out.trim().is_empty() {
                     if let Err(e) = output_tx.send(out.clone()) {
-                        eprintln!("❌ Failed to send output: {}", e);
+                        eprintln!("ERROR: Failed to send output: {}", e);
                     }
                 }
                 ctx.last_exit_code = code;
@@ -310,7 +369,7 @@ pub fn run_debugger_dap(
                     ctx.call_stack.push(Frame::new(pc + 1, Some(args)));
                     pc = logical_target;
                 } else {
-                    eprintln!("❌ CALL to unknown label: {}", label_key);
+                    eprintln!("ERROR: CALL to unknown label: {}", label_key);
                     break 'run;
                 }
                 continue;
@@ -347,12 +406,221 @@ pub fn run_debugger_dap(
                     let logical_target = pre.phys_to_logical[phys_target];
                     pc = logical_target;
                 } else {
-                    eprintln!("❌ GOTO to unknown label: {}", label_key);
+                    eprintln!("ERROR: GOTO to unknown label: {}", label_key);
                     break 'run;
                 }
                 continue;
             }
-            eprintln!("Executing: {}", line);
+            if line_upper.starts_with("PUSHD") {
+                let rest = line[5..].trim();
+                let path = if rest.is_empty() { None } else { Some(rest) };
+                if let Err(e) = ctx.handle_pushd(path) {
+                    eprintln!("ERROR: PUSHD error: {}", e);
+                }
+                pc += 1;
+                continue;
+            }
+            if line_upper.starts_with("POPD") {
+                if let Err(e) = ctx.handle_popd() {
+                    eprintln!("ERROR: POPD error: {}", e);
+                }
+                pc += 1;
+                continue;
+            }
+            if line_upper.starts_with("SHIFT") {
+                let rest = line[5..].trim();
+                let count = if rest.is_empty() {
+                    1
+                } else {
+                    rest.split_whitespace()
+                        .next()
+                        .and_then(|s| s.trim_start_matches('/').parse().ok())
+                        .unwrap_or(1)
+                };
+                ctx.handle_shift(count);
+                pc += 1;
+                continue;
+            }
+            // Check if this is a FOR loop and expand it for stepping
+            if line_upper.starts_with("FOR ") {
+                if let Some(for_stmt) = parse_for_statement(&line) {
+                    eprintln!("FOR: Loop detected, expanding iterations...");
+
+                    match ctx.expand_for_loop(&for_stmt.loop_type) {
+                        Ok(iterations) => {
+                            eprintln!("FOR: Loop expanded into {} iterations", iterations.len());
+
+                            if let Err(e) = output_tx
+                                .send(format!("FOR: Loop: {} iterations\r\n", iterations.len()))
+                            {
+                                eprintln!("ERROR: Failed to send output: {}", e);
+                            }
+
+                            // Execute each iteration
+                            for (idx, (command, var_name, var_value)) in
+                                iterations.iter().enumerate()
+                            {
+                                eprintln!("  Iteration {}: {}={}", idx + 1, var_name, var_value);
+
+                                // Update loop variable
+                                ctx.set_loop_variable(var_name, var_value);
+
+                                // Send iteration info to debug console
+                                if let Err(e) = output_tx.send(format!(
+                                    "  [{}] {}={}\r\n",
+                                    idx + 1,
+                                    var_name,
+                                    var_value
+                                )) {
+                                    eprintln!("ERROR: Failed to send output: {}", e);
+                                }
+
+                                // Track SET commands in the iteration
+                                ctx.track_set_command(command);
+
+                                // Execute the command
+                                match ctx.run_command(command) {
+                                    Ok((out, code)) => {
+                                        if !out.trim().is_empty() {
+                                            if let Err(e) = output_tx.send(out.clone()) {
+                                                eprintln!("ERROR: Failed to send output: {}", e);
+                                            }
+                                        }
+                                        ctx.last_exit_code = code;
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "ERROR: Command execution error in FOR loop: {}",
+                                            e
+                                        );
+                                        if let Err(e) = output_tx.send(format!(
+                                            "ERROR: Error in iteration {}: {}\r\n",
+                                            idx + 1,
+                                            e
+                                        )) {
+                                            eprintln!("ERROR: Failed to send error output: {}", e);
+                                        }
+                                        // Continue to next iteration instead of breaking
+                                    }
+                                }
+                            }
+
+                            // Skip the FOR loop line itself and continue
+                            pc += 1;
+                            continue;
+                        }
+                        Err(e) => {
+                            eprintln!("ERROR: FOR loop expansion error: {}", e);
+                            if let Err(e) = output_tx
+                                .send(format!("ERROR: FOR loop expansion error: {}\r\n", e))
+                            {
+                                eprintln!("ERROR: Failed to send error output: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check if this is an IF statement and pre-evaluate the condition
+            if line_upper.starts_with("IF ") {
+                if let Some(if_stmt) = parse_if_statement(&line) {
+                    match ctx.evaluate_if_condition(&if_stmt.condition) {
+                        Ok(condition_result) => {
+                            if condition_result {
+                                eprintln!("IF: Condition is TRUE -> will execute THEN branch");
+                                if let Err(e) = output_tx.send(
+                                    "IF: Condition is TRUE -> executing THEN branch\r\n"
+                                        .to_string(),
+                                ) {
+                                    eprintln!("ERROR: Failed to send output: {}", e);
+                                }
+                            } else {
+                                eprintln!("IF: Condition is FALSE -> will skip THEN branch");
+                                if let Err(e) = output_tx.send(
+                                    "IF: Condition is FALSE -> skipping THEN branch\r\n"
+                                        .to_string(),
+                                ) {
+                                    eprintln!("ERROR: Failed to send output: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("WARNING: Failed to evaluate IF condition: {}", e);
+                        }
+                    }
+                }
+            }
+
+            // Parse and display redirections
+            let cmd_with_redirections = parse_redirections(&line);
+
+            // Detect if command is built-in or external
+            let base_cmd = cmd_with_redirections.base_command.trim();
+            let is_builtin = is_builtin_command(base_cmd);
+            let cmd_type = if is_builtin { "built-in" } else { "external" };
+
+            if !cmd_with_redirections.redirections.is_empty() {
+                eprintln!("Executing {} command: {}", cmd_type, line);
+                for redir in &cmd_with_redirections.redirections {
+                    match redir.operator.as_str() {
+                        ">" => {
+                            eprintln!("  |-- Output redirected to: {} (overwrite)", redir.target);
+                            if let Err(e) = output_tx.send(format!(
+                                "  |-- Output redirected to: {} (overwrite)\r\n",
+                                redir.target
+                            )) {
+                                eprintln!("ERROR: Failed to send output: {}", e);
+                            }
+                        }
+                        ">>" => {
+                            eprintln!("  |-- Output redirected to: {} (append)", redir.target);
+                            if let Err(e) = output_tx.send(format!(
+                                "  |-- Output redirected to: {} (append)\r\n",
+                                redir.target
+                            )) {
+                                eprintln!("ERROR: Failed to send output: {}", e);
+                            }
+                        }
+                        "<" => {
+                            eprintln!("  |-- Input redirected from: {}", redir.target);
+                            if let Err(e) = output_tx
+                                .send(format!("  |-- Input redirected from: {}\r\n", redir.target))
+                            {
+                                eprintln!("ERROR: Failed to send output: {}", e);
+                            }
+                        }
+                        "2>" => {
+                            eprintln!("  |-- Error output redirected to: {}", redir.target);
+                            if let Err(e) = output_tx.send(format!(
+                                "  |-- Error output redirected to: {}\r\n",
+                                redir.target
+                            )) {
+                                eprintln!("ERROR: Failed to send output: {}", e);
+                            }
+                        }
+                        "2>&1" => {
+                            eprintln!("  |-- Error output redirected to stdout");
+                            if let Err(e) = output_tx
+                                .send("  |-- Error output redirected to stdout\r\n".to_string())
+                            {
+                                eprintln!("ERROR: Failed to send output: {}", e);
+                            }
+                        }
+                        "|" => {
+                            eprintln!("  |-- Piped to: {}", redir.target);
+                            if let Err(e) =
+                                output_tx.send(format!("  |-- Piped to: {}\r\n", redir.target))
+                            {
+                                eprintln!("ERROR: Failed to send output: {}", e);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                eprintln!("Executing {} command: {}", cmd_type, line);
+            }
+
             ctx.track_set_command(&line);
 
             if let Some(ref mut f) = log {
@@ -369,19 +637,36 @@ pub fn run_debugger_dap(
 
                     if !out.trim().is_empty() {
                         if let Err(e) = output_tx.send(out.clone()) {
-                            eprintln!("❌ Failed to send output: {}", e);
+                            eprintln!("ERROR: Failed to send output: {}", e);
                             if let Some(ref mut f) = log {
-                                writeln!(f, "❌ Failed to send output: {}", e).ok();
+                                writeln!(f, "ERROR: Failed to send output: {}", e).ok();
                                 f.flush().ok();
                             }
                         }
                     }
                     ctx.last_exit_code = code;
+
+                    // Check for data breakpoint hits after command execution
+                    if ctx.check_data_breakpoints() {
+                        eprintln!("BREAK: Data breakpoint triggered, pausing execution");
+                        if let Some(ref mut f) = log {
+                            writeln!(f, "BREAK: Data breakpoint triggered").ok();
+                            f.flush().ok();
+                        }
+                        // Send stopped event
+                        let _ = event_tx.send(("stopped".to_string(), pc));
+                        // Update data breakpoint values for next iteration
+                        ctx.update_data_breakpoints();
+                        // Wait for continue
+                        ctx.continue_requested = false;
+                        ctx.set_mode(crate::debugger::RunMode::Continue);
+                        // Continue to next iteration
+                    }
                 }
                 Err(e) => {
-                    eprintln!("❌ Command execution error: {}", e);
+                    eprintln!("ERROR: Command execution error: {}", e);
                     if let Some(ref mut f) = log {
-                        writeln!(f, "❌ Command execution error: {}", e).ok();
+                        writeln!(f, "ERROR: Command execution error: {}", e).ok();
                         f.flush().ok();
                     }
                     break 'run;
